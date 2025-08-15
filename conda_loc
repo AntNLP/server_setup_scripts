@@ -1,0 +1,22 @@
+#!/bin/bash
+# experimental, not used for now
+
+# Check if ~/.conda is a directory
+if [ -d ~/.conda ]; then
+    mv ~/.conda ~/.conda_bak
+fi
+
+# Check if the argument is provided
+if [ $# -eq 0 ]; then
+    echo "No arguments provided. Please provide an option ('global' or 'local')."
+    exit 1
+fi
+
+# Create a symlink based on the option
+if [ "$1" == "global" ]; then
+    mkdir -p ~/data/.conda && ln -sfn ~/data/.conda ~/.conda
+elif [ "$1" == "local" ]; then
+    mkdir -p ~/local/.conda && ln -sfn ~/local/.conda ~/.conda
+else
+    echo "Usage: "
+fi

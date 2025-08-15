@@ -1,0 +1,241 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# @File    :   feishu_msg
+# @Time    :   2024/10/19 20:40:29
+# @Author  :   bg51717
+# @Version :   1.0
+# @Desc    :   飞书通知机器人:企业版飞书内建企业的机器人,使用API通知指定用户信息
+
+
+import argparse
+import json
+import os
+import socket
+import uuid
+from datetime import datetime
+
+import requests
+
+from feishu_msg_secrets import APP_ID, APP_SECRET
+
+
+def get_value(args: dict, key: str):
+    """获取指定值
+    顺序:
+        1.命令行参数
+        2.环境变量
+        3.""
+    """
+    return args[key] if (key in args and args[key] != "") else os.getenv(f"FEISHU_{key.upper()}", "")
+
+
+def get_ip():
+    try:
+        # 创建一个 UDP socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # 尝试连接到外部地址（不发送数据），用于获取 IP 地址
+        s.connect(("202.120.80.2", 80))
+        ip_address = s.getsockname()[0]
+    except socket.error as e:
+        # 捕获异常并处理
+        print(f"获取 IP 地址时出错: {e}")
+        ip_address = ""  # 可以返回 "" 或者 '127.0.0.1' 作为回退
+    finally:
+        s.close()  # 确保套接字始终被关闭
+    return ip_address
+
+
+def prepare_template_variable(data) -> str:
+    """根据 JSON 数据生成模板变量。
+    Args:
+        json_data (dict): 包含通知内容的 JSON 数据。
+    Returns:
+        dict: 模板变量字典，用于填充到模板中。
+    """
+    # 标题:hostname
+    title = socket.gethostname()
+    if get_value(data, "title") != "":
+        title = title + "：" + get_value(data, "title")
+    template_variable = {
+        "title": title,
+    }
+    # 正文
+    text_data, code_data = [], {}
+    # IP地址
+    text_data.append(f"- IP：{get_ip()}")
+    # 时间
+    start_time = get_value(data, "start_time")
+    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if start_time != "":
+        text_data.append(f"- 开始时间：{start_time}")
+        text_data.append(f"- 结束时间：{end_time}")
+        time_diff = str(
+            datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+        )
+        text_data.append(f"- 持续时间：{time_diff}")
+    else:
+        text_data.append(f"- 结束时间：{end_time}")
+    # 额外消息
+    message = get_value(data, "msg")
+    if message != "":
+        text_data.append(f"- 消息：{message}")
+    # 额外环境变量
+    extra_envs = get_value(data, "extra_envs")
+    if extra_envs != "":
+        extra_envs = extra_envs.split(",")
+    else:
+        extra_envs = []
+    extra_envs.append("CUDA_VISIBLE_DEVICES")
+    for env_key in extra_envs:
+        code_data[env_key] = os.getenv(env_key, "")
+    # 额外参数
+    code_data.update(data["extra_args"])
+    # 汇总结果
+    template_variable["text_data"] = "\n".join(text_data)
+    template_variable["code_data"] = (
+        "```JSON\n" + json.dumps(code_data, ensure_ascii=False, indent=0)[2:-2] + "\n```"
+    )  # 去除大括号和换行
+    return template_variable
+
+
+class FeishuClient:
+    """考虑只使用http请求，去除对官方SDK依赖"""
+
+    url_dict = {
+        "tenant_access_token": "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        "get_id": "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id",
+        "send_message": "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+    }
+
+    def __init__(self, app_id: str, app_secret: str):
+        self.app_id = app_id
+        self.app_secret = app_secret
+
+    def get_tenant_access_token(self):
+        """根据app_id和app_secret获取tenant_access_token
+        文档: https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal
+        """
+        post_url = self.url_dict["tenant_access_token"]
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        data = {
+            "app_id": self.app_id,
+            "app_secret": self.app_secret,
+        }
+        response = requests.post(url=post_url, headers=headers, json=data)
+        assert response.status_code == 200, f"Failed to get tenant_access_token with the response: {response.json()}"
+        response_json = response.json()
+        return response_json["tenant_access_token"]
+
+    def get_openid_by_phone(self, phone: str):
+        """根据phone,app_id,app_secret获取openid
+        文档: https://open.feishu.cn/document/server-docs/contact-v3/user/batch_get_id
+        """
+        tenant_access_token = self.get_tenant_access_token()
+        post_url = self.url_dict["get_id"]
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {tenant_access_token}",
+        }
+        data = {
+            "mobiles": [phone],
+            "include_resigned": True,
+        }
+        response = requests.post(url=post_url, headers=headers, json=data)
+        assert response.status_code == 200, f"Failed to get open id by phone with the response:{response.json()}"
+        response_json = response.json()
+        return response_json["data"]["user_list"][0]["user_id"]
+
+    def send_message_by_openid(self, openid: str, content_data: dict):
+        """根据用户的openid发送消息
+        文档: https://open.feishu.cn/document/server-docs/im-v1/message/create
+        """
+        tenant_access_token = self.get_tenant_access_token()
+        post_url = self.url_dict["send_message"]
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {tenant_access_token}",
+        }
+        data = {
+            "content": content_data,
+            "msg_type": "interactive",
+            "receive_id": openid,
+            "uuid": str(uuid.uuid4()),
+        }
+        response = requests.post(url=post_url, headers=headers, json=data)
+        assert response.status_code == 200, f"Failed to send message with the response:{response.json()}"
+
+
+def inform(user_phone: str, data: dict, app_id: str, app_secret: str) -> bool:
+    """
+    通过飞书应用向指定用户发送通知。
+
+    Args:
+        user_phone (str): 用户的手机号，用于标识接收通知的飞书账户。(API其实也可以使用邮箱，但应该所有用户都是用的手机号)
+        data (dict): 包含通知内容的 JSON 数据，通常包括消息内容、标题、附件等。
+        app_id (str): 飞书应用的 App ID，用于身份验证。
+        app_secret (str): 飞书应用的 App Secret，用于身份验证。
+
+    Returns:
+        bool: 返回通知是否成功发送。成功返回 True，失败返回 False。
+    """
+    client = FeishuClient(app_id=app_id, app_secret=app_secret)
+    user_open_id = client.get_openid_by_phone(user_phone)
+    template_variable = prepare_template_variable(data)
+    content_data = {
+        "type": "template",
+        "data": {
+            "template_id": "AAqDgQy7v4t3J",
+            "template_version_name": "1.0.4",
+            "template_variable": template_variable,
+        },
+    }
+    client.send_message_by_openid(user_open_id, json.dumps(content_data, ensure_ascii=False))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="发送自定义消息到自己的飞书，同时自动附带一些环境信息。\n任何额外命令行参数将以键值对形式出现在其他信息中。",
+    )
+    parser.add_argument("--user", "-u", type=str, help="收信人手机号", default="")
+    parser.add_argument("--title", "-t", type=str, default="", help="汇报时的标题信息")
+    parser.add_argument("--msg", "-m", type=str, default="", help="汇报时附带的文本消息")
+    parser.add_argument(
+        "--start_time",
+        "-s",
+        type=str,
+        default="",
+        help="运行开始时间，格式要求:%%Y-%%m-%%d %%H:%%M:%%S，Linux命令如下:\nexport START_TIME=$(date +'%%Y-%%m-%%d %%H:%%M:%%S')",
+    )
+    parser.add_argument(
+        "--extra_envs",
+        "-e",
+        type=str,
+        default="",
+        help="额外需要汇报的环境变量，多个用英文逗号隔开，默认包含 CUDA_VISIBLE_DEVICES 。",
+    )
+    parser.add_argument("--app_id", type=str, default=APP_ID, help="飞书应用ID")
+    parser.add_argument("--app_secret", type=str, default=APP_SECRET, help="飞书应用Secret")
+    # 获取参数
+    args, unknown_args = parser.parse_known_args()
+    data = vars(args)
+    # 处理常用的
+    user_phone = get_value(data, "user")
+    if user_phone == "":
+        raise ValueError("需要--user或export FEISHU_USER")
+    data.pop("user")
+    app_id = data.pop("app_id")
+    app_secret = data.pop("app_secret")
+    # 添加额外参数
+    extra_args = {}
+    for i in range(0, len(unknown_args), 2):
+        if i + 1 < len(unknown_args) and unknown_args[i].startswith("--"):
+            extra_args[unknown_args[i][2:]] = unknown_args[i + 1]
+    data["extra_args"] = extra_args
+    inform(user_phone=user_phone, data=data, app_id=app_id, app_secret=app_secret)
+
+
+if __name__ == "__main__":
+    main()

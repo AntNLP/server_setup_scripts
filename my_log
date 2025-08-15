@@ -1,0 +1,19 @@
+/var/log/nas_monitor.log {
+    size 1M
+    missingok
+    rotate 5
+    compress
+    notifempty
+    create 640 root root
+    su root root
+}
+
+/var/log/ecnu_auth.log {
+    size 1M
+    missingok
+    rotate 5
+    compress
+    notifempty
+    create 640 root root
+    su root root
+}

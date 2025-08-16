@@ -25,11 +25,16 @@ UID_MAPPING = "/nas/public/app/users/uid_mapping.csv"
 
 
 def run_command(
-    command: Union[str, List[str]], input_str: Optional[str] = None, suppress_errors: Optional[List[str]] = None
+    command: Union[str, List[str]],
+    input_str: Optional[str] = None,
+    suppress_errors: Optional[List[str]] = None,
+    verbose: Union[bool, str] = False,
 ):
     try:
         if isinstance(command, str):
             command = shlex.split(command)
+        if verbose:
+            print(f"{verbose + ': ' if isinstance(verbose, str) else ''}{' '.join(command)}")
         result = subprocess.run(
             command,
             text=True,  # decode bytes to str
@@ -79,6 +84,10 @@ def user_exists(username):
         return False
 
 
+def get_user_primary_group(username):
+    return pwd.getpwnam(username).pw_gid
+
+
 def ask_confirm(prompt):
     """询问用户是否确认"""
     while True:
@@ -116,34 +125,43 @@ def create_user(username, uid):
     run_command("chpasswd", input_str=f"{username}:{password}", suppress_errors=["BAD PASSWORD"])
 
 
-def create_links(username):
-    # 创建符号链接
-    links = [  # (target, link, force)
-        ("/nas/public", f"/home/{username}/public", True),
-        (f"/nas/data/{username}", f"/home/{username}/data", True),
-        (f"/home/{username}/data/.conda", f"/home/{username}/.conda", False),  # avoid overwrite existing .conda
-    ]
-    for target, link, force in links:
-        if force or not os.path.exists(link):
-            run_command(f"ln -sfn '{target}' '{link}'")
-            # -h: change symlink itself, do not add trailing slash
-            run_command(f"chown -h '{username}:antnlp' '{link}'")
-
+def create_links(username, group="antnlp", local_only=False, verbose=False):
+    """local_only: 用于为其他用户（非csv中列出的用户）创建local链接"""
     # 创建本地存储目录
     for local_path in glob.glob("/mnt/local*"):
         user_path = f"{local_path}/{username}"
-        os.makedirs(user_path, mode=0o755, exist_ok=True)
-        run_command(f"chown '{username}:antnlp' '{user_path}'")
+        if not os.path.exists(user_path):
+            os.makedirs(user_path, mode=0o755, exist_ok=True)
+            if verbose:
+                print(f"{verbose + ': ' if isinstance(verbose, str) else ''}mkdir -p {user_path}")
+            run_command(f"chown '{username}:{group}' '{user_path}'")
 
         # Extract the suffix from the local path for the link name
         local_suffix = local_path.replace("/mnt/local", "")
         link_path = f"/home/{username}/local{local_suffix}"
-        run_command(f"ln -sfn '{user_path}' '{link_path}'")
-        run_command(f"chown -h '{username}:antnlp' '{link_path}'")
+        if not os.path.exists(link_path):
+            run_command(f"ln -sfn '{user_path}' '{link_path}'", verbose=verbose)
+            run_command(f"chown -h '{username}:{group}' '{link_path}'")
+
+    if local_only:
+        return
+
+    # 创建NAS链接
+    links = [  # (target, link, force)
+        ("/nas/public", f"/home/{username}/public"),
+        (f"/nas/data/{username}", f"/home/{username}/data"),
+        (f"/home/{username}/data/.conda", f"/home/{username}/.conda"),
+    ]
+    for target, link in links:
+        if not os.path.exists(link):
+            run_command(f"ln -sfn '{target}' '{link}'", verbose=verbose)
+            # -h: change symlink itself, do not add trailing slash
+            run_command(f"chown -h '{username}:{group}' '{link}'")
 
 
 def process_users():
     """处理所有用户账户"""
+    users = set()  # 记录所有用户名
 
     with open(UID_MAPPING, "r") as f:
         reader = csv.reader(f)
@@ -157,15 +175,17 @@ def process_users():
                 continue
 
             username, uid, active = [s.strip() for s in row[:3]]
+            users.add(username)
 
             if username.startswith("#"):
                 print("skipping", username)
+                users.add(username[1:].strip())
                 continue
 
             if active == "1":
                 if user_exists(username):
                     print(f"{username} is found")
-                    create_links(username)
+                    create_links(username, verbose=f"Fixing link for {username}")
                 else:
                     print(f"creating user {username} with uid {uid}")
                     create_user(username, uid)
@@ -174,6 +194,18 @@ def process_users():
                 if user_exists(username):
                     if ask_confirm(f"delete user {username}?"):
                         delete_user(username)
+    return users
+
+
+def fix_other_users(processed_users):
+    for user in os.listdir("/home"):
+        if user not in processed_users and user_exists(user):
+            create_links(
+                user,
+                group=get_user_primary_group(user),
+                local_only=True,
+                verbose=f"Creating local link for {user}",
+            )
 
 
 if __name__ == "__main__":
@@ -181,4 +213,5 @@ if __name__ == "__main__":
     assert os.path.isfile(UID_MAPPING), f"Error: UID mapping file not found at {UID_MAPPING}"
 
     create_group()
-    process_users()
+    users = process_users()
+    fix_other_users(users)

@@ -25,20 +25,20 @@ fi
 check_nas_inner() {
     # 1. 检查基础网络连通性
     if ! ping -c1 -W2 "${NAS_IP}" >/dev/null 2>&1; then
-        log "NAS network unreachable"
+        msg="network unreachable"
         return 1
     fi
 
     # 2. 检查NFS服务状态
     if ! timeout 5s rpcinfo -t "${NAS_IP}" nfs >/dev/null 2>&1; then
-        log "NFS service not responding"
+        msg="service not responding"
         return 1
     fi
 
     # 3. 测试文件操作（带超时）
     # if not mounted, MOUNT_POINT is local, touch will success
     if ! timeout 5s touch "${TEST_FILE}" >/dev/null 2>&1; then
-        log "File operation timed out"
+        msg="file operation timed out"
         return 1
     fi
     
@@ -53,7 +53,7 @@ check_nas() {
             (( attempt > 1 )) && log "NAS check succeeded on attempt ${attempt}"
             return 0
         fi
-        log "NAS check failed (attempt ${attempt}/${max_attempts})"
+        log "NAS check failed: ${msg} (attempt ${attempt}/${max_attempts})"
         sleep 15
     done
     return 1

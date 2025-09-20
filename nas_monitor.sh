@@ -68,33 +68,18 @@ is_mounted() {
 }
 
 # 主逻辑
-if check_nas; then
-    # NAS可用
-    if is_mounted; then
-        # 已挂载且正常 - 无操作
-        # log "NAS available and mounted - no action"
+if is_mounted; then
+    if check_nas; then # 已挂载 - 检查NAS是否可用
+        # 已挂载且NAS可用 - 无操作
         :
     else
-        # 未挂载但可用 - 尝试挂载
-        log "NAS available but not mounted - mounting..."
-        mount -a
-        if is_mounted; then
-            log "Mount successful"
-        else
-            log "Mount failed!"
-        fi
-    fi
-else
-    # NAS不可用
-    if is_mounted; then
-        # 已挂载但不可用 - 尝试卸载
+        # 已挂载但NAS不可用 - 尝试卸载
         log "NAS unavailable but mounted - unmounting..."
         
         # 尝试正常卸载
-        umount "${MOUNT_POINT}" 2>/dev/null
+        timeout 10s umount "${MOUNT_POINT}" 2>/dev/null
         
-        # 检查是否卸载成功
-        if is_mounted; then
+        if is_mounted; then # 检查是否卸载成功
             # 正常卸载失败 - 尝试强制卸载
             log "Normal umount failed - forcing lazy unmount"
             umount -l "${MOUNT_POINT}"
@@ -108,8 +93,19 @@ else
         else
             log "Unmounted successfully"
         fi
+    fi
+else
+    if check_nas_inner; then # 未挂载 - 不重试检查NAS
+        # 未挂载但NAS可用 - 尝试挂载
+        log "NAS available but not mounted - mounting..."
+        mount -a
+        if is_mounted; then
+            log "Mount successful"
+        else
+            log "Mount failed!"
+        fi
     else
-        # 未挂载且不可用 - 无操作
-        log "NAS unavailable and not mounted - no action"
+        # 未挂载且NAS不可用 - 无操作
+        log "NAS check failed: ${msg}. NAS unavailable and not mounted - no action"
     fi
 fi
